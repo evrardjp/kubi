@@ -6,6 +6,7 @@ import (
 
 	"github.com/dgrijalva/jwt-go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	podSecurity "k8s.io/pod-security-admission/api"
 )
 
 type LdapConfig struct {
@@ -20,6 +21,7 @@ type LdapConfig struct {
 	AdminGroupBase       string
 	Host                 string
 	Port                 int
+	PageSize             uint32
 	UseSSL               bool
 	StartTLS             bool
 	SkipTLSVerification  bool
@@ -31,22 +33,26 @@ type LdapConfig struct {
 }
 
 type Config struct {
-	Tenant                  string
-	Ldap                    LdapConfig
-	PublicApiServerURL      string
-	KubeCa                  string
-	KubeCaText              string
-	KubeToken               string
-	ApiServerTLSConfig      tls.Config
-	TokenLifeTime           string
-	ExtraTokenLifeTime      string
-	Locator                 string
-	NetworkPolicy           bool
-	CustomLabels            map[string]string
-	DefaultPermission       string
-	Blacklist               []string
-	BlackWhitelistNamespace string
-	Whitelist               bool
+	PodSecurityAdmissionEnforcement podSecurity.Level
+	PodSecurityAdmissionWarning     podSecurity.Level
+	PodSecurityAdmissionAudit       podSecurity.Level
+	Tenant                          string
+	Ldap                            LdapConfig
+	PublicApiServerURL              string
+	KubeCa                          string
+	KubeCaText                      string
+	KubeToken                       string
+	ApiServerTLSConfig              tls.Config
+	TokenLifeTime                   string
+	ExtraTokenLifeTime              string
+	Locator                         string
+	NetworkPolicy                   bool
+	CustomLabels                    map[string]string
+	DefaultPermission               string
+	PrivilegedNamespaces            []string
+	Blacklist                       []string
+	BlackWhitelistNamespace         string
+	Whitelist                       bool
 }
 
 // Note: struct fields must be public in order for unmarshal to
@@ -117,7 +123,7 @@ func (project *Project) Namespace() (ns string) {
 	if len(project.Environment) > 0 {
 		ns = fmt.Sprintf("%s-%s", project.Project, project.Environment)
 	} else {
-		ns = fmt.Sprintf("%s", project.Project)
+		ns = project.Project
 	}
 	return
 }

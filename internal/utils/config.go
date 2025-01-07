@@ -4,18 +4,19 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
-	"github.com/ca-gip/kubi/pkg/types"
-	"github.com/go-ozzo/ozzo-validation"
-	"github.com/go-ozzo/ozzo-validation/is"
-	"io/ioutil"
-	"k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/client-go/rest"
 	"log"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/ca-gip/kubi/pkg/types"
+	validation "github.com/go-ozzo/ozzo-validation"
+	"github.com/go-ozzo/ozzo-validation/is"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/client-go/rest"
+	podSecurity "k8s.io/pod-security-admission/api"
 )
 
 var Config *types.Config
@@ -33,16 +34,19 @@ func MakeConfig() (*types.Config, error) {
 		return nil, rest.ErrNotInCluster
 	}
 
-	kubeToken, errToken := ioutil.ReadFile(TokenFile)
+	kubeToken, errToken := os.ReadFile(TokenFile)
 	Check(errToken)
 
-	kubeCA, errCA := ioutil.ReadFile(TlsCaFile)
+	kubeCA, errCA := os.ReadFile(TlsCaFile)
 	Check(errCA)
 
 	caEncoded := base64.StdEncoding.EncodeToString(kubeCA)
 
 	// Get the SystemCertPool, continue with an empty pool on error
-	rootCAs, _ := x509.SystemCertPool()
+	rootCAs, err := x509.SystemCertPool()
+	if err != nil {
+		log.Fatalf("Cannot retrieve system cert pool, exiting for security reason")
+	}
 	if rootCAs == nil {
 		rootCAs = x509.NewCertPool()
 	}
@@ -58,6 +62,10 @@ func MakeConfig() (*types.Config, error) {
 	}
 
 	// LDAP validation
+
+	ldapPageSize, errLdapPageSize := strconv.Atoi(getEnv("LDAP_PAGE_SIZE", "1000"))
+	Checkf(errLdapPageSize, "Invalid LDAP_PAGE_SIZE, must be an integer")
+
 	ldapPort, errLdapPort := strconv.Atoi(getEnv("LDAP_PORT", "389"))
 	Checkf(errLdapPort, "Invalid LDAP_PORT, must be an integer")
 
@@ -94,6 +102,27 @@ func MakeConfig() (*types.Config, error) {
 	ldapUserFilter := getEnv("LDAP_USERFILTER", "(cn=%s)")
 	tenant := strings.ToLower(getEnv("TENANT", KubiTenantUndeterminable))
 
+	// No need to state a default or crash, because kubernetes defaults to restricted.
+	podSecurityAdmissionEnforcement, errPodSecurityAdmissionEnforcement := podSecurity.ParseLevel(strings.ToLower(getEnv("PODSECURITYADMISSION_ENFORCEMENT", string(podSecurity.LevelRestricted))))
+
+	if errPodSecurityAdmissionEnforcement != nil {
+		Log.Error().Msgf("PODSECURITYADMISSION_ENFORCEMENT is incorrect. %s ", errPodSecurityAdmissionEnforcement.Error())
+	}
+
+	// No need to state a default or crash, because kubernetes defaults to restricted.
+	podSecurityAdmissionWarning, errPodSecurityAdmissionWarning := podSecurity.ParseLevel(strings.ToLower(getEnv("PODSECURITYADMISSION_WARNING", string(podSecurity.LevelRestricted))))
+
+	if errPodSecurityAdmissionWarning != nil {
+		Log.Error().Msgf("PODSECURITYADMISSION_WARNING is incorrect. %s ", errPodSecurityAdmissionWarning.Error())
+	}
+
+	// No need to state a default or crash, because kubernetes defaults to restricted.
+	podSecurityAdmissionAudit, errPodSecurityAdmissionAudit := podSecurity.ParseLevel(strings.ToLower(getEnv("PODSECURITYADMISSION_AUDIT", string(podSecurity.LevelRestricted))))
+
+	if errPodSecurityAdmissionAudit != nil {
+		Log.Error().Msgf("PODSECURITYADMISSION_AUDIT is incorrect. %s ", errPodSecurityAdmissionAudit.Error())
+	}
+
 	ldapConfig := types.LdapConfig{
 		UserBase:             os.Getenv("LDAP_USERBASE"),
 		GroupBase:            os.Getenv("LDAP_GROUPBASE"),
@@ -104,6 +133,7 @@ func MakeConfig() (*types.Config, error) {
 		AdminUserBase:        getEnv("LDAP_ADMIN_USERBASE", ""),
 		AdminGroupBase:       getEnv("LDAP_ADMIN_GROUPBASE", ""),
 		ViewerGroupBase:      getEnv("LDAP_VIEWER_GROUPBASE", ""),
+		PageSize:             uint32(ldapPageSize),
 		Host:                 os.Getenv("LDAP_SERVER"),
 		Port:                 ldapPort,
 		UseSSL:               useSSL,
@@ -116,29 +146,37 @@ func MakeConfig() (*types.Config, error) {
 		Attributes:           []string{"givenName", "sn", "mail", "uid", "cn", "userPrincipalName"},
 	}
 	config := &types.Config{
-		Tenant:                  tenant,
-		Ldap:                    ldapConfig,
-		KubeCa:                  caEncoded,
-		KubeCaText:              string(kubeCA),
-		KubeToken:               string(kubeToken),
-		PublicApiServerURL:      getEnv("PUBLIC_APISERVER_URL", ""),
-		ApiServerTLSConfig:      *tlsConfig,
-		TokenLifeTime:           getEnv("TOKEN_LIFETIME", "4h"),
-		ExtraTokenLifeTime:      getEnv("EXTRA_TOKEN_LIFETIME", "720h"),
-		Locator:                 getEnv("LOCATOR", KubiLocatorIntranet),
-		NetworkPolicy:           networkpolicyEnabled,
-		CustomLabels:            customLabels,
-		DefaultPermission:       getEnv("DEFAULT_PERMISSION", ""),
-		Blacklist:               strings.Split(getEnv("BLACKLIST", ""), ","),
-		Whitelist:               whitelist,
-		BlackWhitelistNamespace: getEnv("BLACK_WHITELIST_NAMESPACE", "default"),
+		Tenant:                          tenant,
+		PodSecurityAdmissionEnforcement: podSecurityAdmissionEnforcement,
+		PodSecurityAdmissionWarning:     podSecurityAdmissionWarning,
+		PodSecurityAdmissionAudit:       podSecurityAdmissionAudit,
+		Ldap:                            ldapConfig,
+		KubeCa:                          caEncoded,
+		KubeCaText:                      string(kubeCA),
+		KubeToken:                       string(kubeToken),
+		PublicApiServerURL:              getEnv("PUBLIC_APISERVER_URL", ""),
+		ApiServerTLSConfig:              *tlsConfig,
+		TokenLifeTime:                   getEnv("TOKEN_LIFETIME", "4h"),
+		ExtraTokenLifeTime:              getEnv("EXTRA_TOKEN_LIFETIME", "720h"),
+		Locator:                         getEnv("LOCATOR", KubiLocatorIntranet),
+		NetworkPolicy:                   networkpolicyEnabled,
+		CustomLabels:                    customLabels,
+		DefaultPermission:               getEnv("DEFAULT_PERMISSION", ""),
+		PrivilegedNamespaces:            strings.Split(getEnv("PRIVILEGED_NAMESPACES", ""), ","),
+		Blacklist:                       strings.Split(getEnv("BLACKLIST", ""), ","),
+		Whitelist:                       whitelist,
+		BlackWhitelistNamespace:         getEnv("BLACK_WHITELIST_NAMESPACE", "default"),
 	}
 
-	err := validation.ValidateStruct(config,
+	// TODO: Remove validation through ozzo-validation
+	err = validation.ValidateStruct(config,
 		validation.Field(&config.KubeToken, validation.Required),
 		validation.Field(&config.KubeCa, validation.Required, is.Base64),
 		validation.Field(&config.PublicApiServerURL, validation.Required, is.URL),
 	)
+	// TODO: Get rid of Check method
+	Check(err)
+
 	errLdap := validation.ValidateStruct(&ldapConfig,
 		validation.Field(&ldapConfig.UserBase, validation.Required, validation.Length(2, 200)),
 		validation.Field(&ldapConfig.GroupBase, validation.Required, validation.Length(2, 200)),
